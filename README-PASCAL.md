@@ -210,6 +210,67 @@ conda activate pascal
 python acestep/api_server.py --host 0.0.0.0 --port 7860
 ```
 
+## Generation Parameters
+
+### Basic
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `caption` | str | — | Music description (genre, mood, instruments, style). < 512 chars |
+| `lyrics` | str | `[Instrumental]` | Song lyrics with structure tags like `[Verse 1]`, `[Chorus]`. < 4096 chars |
+| `duration` | int | auto | Target length in seconds (10–600) |
+| `bpm` | int/None | auto | Beats per minute (30–300) |
+| `keyscale` | str | auto | Musical key, e.g. `"C Major"`, `"Am"` |
+| `timesignature` | int | auto | Time signature numerator: 2 (2/4), 3 (3/4), 4 (4/4), 6 (6/8) |
+| `vocal_language` | str | `"en"` | Language code: en, ja, zh, ko, es, fr, de, etc. |
+| `seed` | int | -1 | Reproducibility seed. -1 = random |
+
+### Generation Control
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `inference_steps` | int | 8 (turbo) | Diffusion steps. 8 for turbo, 32–100 for base model |
+| `guidance_scale` | float | 1.0 | CFG strength. Only affects non-turbo models |
+| `thinking` | bool | False | Enable LM Chain-of-Thought reasoning (better structure, slower) |
+| `lm_temperature` | float | 0.85 | LM sampling temperature (0.0–2.0). Higher = more creative |
+| `lm_top_k` | int | 0 | LM top-k sampling (0 = disabled) |
+| `lm_top_p` | float | 1.0 | LM nucleus sampling (1.0 = disabled) |
+| `lm_negative_prompt` | str | `""` | What the LM should avoid generating |
+| `use_cot_metas` | bool | True | Let LM generate BPM/key/duration via reasoning |
+| `use_cot_caption` | bool | True | Let LM rewrite/expand your caption |
+
+### Advanced (DiT)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_adg` | bool | False | Adaptive Dual Guidance (base model only) |
+| `cfg_interval_start` | float | 0.0 | Start ratio for CFG application |
+| `cfg_interval_end` | float | 1.0 | End ratio for CFG application |
+| `shift` | float | 1.0 | Timestep shift factor |
+| `latent_shift` | float | 0.0 | Additive shift on DiT latents before VAE decode |
+| `latent_rescale` | float | 1.0 | Multiplicative rescale on latents |
+| `enable_normalization` | bool | True | Loudness normalization on output |
+| `normalization_db` | float | -1.0 | Target peak loudness in dBFS |
+
+### Task Types
+
+| `task_type` | Description | Extra params needed |
+|-------------|-------------|---------------------|
+| `text2music` | Standard text-to-music generation | — |
+| `cover` | Cover an existing song in new style | `reference_audio` |
+| `repaint` | Replace a section of a song | `src_audio`, `repainting_start`, `repainting_end` |
+| `extract` | Extract/stem separation | `src_audio` |
+| `complete` | Continue/extend a song | `src_audio` |
+| `lego` | Splice sections together | `src_audio`, `repainting_start`, `repainting_end` |
+
+### LM CoT (Chain-of-Thought) Modes
+
+| Parameter | Effect |
+|-----------|--------|
+| `use_cot_metas=True` | LM reasons about BPM, key, duration before generating |
+| `use_cot_caption=True` | LM expands your short caption into a detailed description |
+| `use_cot_language=True` | LM auto-detects vocal language from lyrics |
+
 ## Single GPU Setup (12-16GB VRAM)
 
 If you only have one Pascal GPU:
