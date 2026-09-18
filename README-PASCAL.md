@@ -203,12 +203,62 @@ result = generate_music(
 print(f"Generated: {result.audios[0]['path']}")
 ```
 
-### API Server
+### HTTP API
+
+The Gradio server also exposes a REST API on the same port (7860):
+
+| Method | Path | Purpose |
+|--------|------|----------|
+| `GET` | `/health` | Health check |
+| `GET` | `/v1/models` | List loaded models |
+| `POST` | `/release_task` | **Generate music** (main endpoint) |
+| `POST` | `/query_result` | Check task status |
+| `GET` | `/v1/audio?task_id=...` | Download generated WAV |
+| `POST` | `/format_input` | Enhance lyrics/caption via LM |
+
+#### Generate a song
 
 ```bash
-conda activate pascal
-python acestep/api_server.py --host 0.0.0.0 --port 7860
+curl -X POST http://localhost:7860/release_task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "An upbeat indie rock song with jangly guitars",
+    "lyrics": "[Verse 1]\nYour lyrics here...\n[Chorus]\nOh yeah...",
+    "duration": 60,
+    "bpm": 120,
+    "keyscale": "C Major",
+    "vocal_language": "en",
+    "seed": 42,
+    "inference_steps": 8,
+    "lm_temperature": 0.85
+  }'
 ```
+
+Response: `{"task_id": "...", "status": "pending"}`
+
+#### Poll for completion
+
+```bash
+curl -X POST http://localhost:7860/query_result \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "YOUR_TASK_ID"}'
+```
+
+#### Download the audio
+
+```bash
+curl -o song.wav "http://localhost:7860/v1/audio?task_id=YOUR_TASK_ID"
+```
+
+#### Enhance lyrics (optional, before generating)
+
+```bash
+curl -X POST http://localhost:7860/format_input \
+  -H "Content-Type: application/json" \
+  -d '{"caption": "sad piano ballad", "lyrics": "[Verse]\nI miss you..."}'
+```
+
+Returns enhanced caption + structured metadata (BPM, key, duration) you can feed into `/release_task`.
 
 ## Generation Parameters
 
