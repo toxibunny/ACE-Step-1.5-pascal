@@ -38,7 +38,7 @@ VRAM_AUTO_OFFLOAD_THRESHOLD_GB = 20.0
 # PyTorch installation URLs for diagnostics
 PYTORCH_CUDA_INSTALL_URL = "https://download.pytorch.org/whl/cu121"
 PYTORCH_ROCM_INSTALL_URL = "https://download.pytorch.org/whl/rocm6.0"
-VALID_LM_BACKENDS = {"vllm", "pt", "mlx"}
+VALID_LM_BACKENDS = {"vllm", "pt", "mlx","llamacpp"} #strawberry:added llama.cpp
 
 
 def is_mps_platform() -> bool:
@@ -59,13 +59,42 @@ def is_mps_platform() -> bool:
 
 
 def is_cuda_available() -> bool:
-    """Return whether CUDA runtime is available."""
+    """Return whether CUDA runtime is available AND can actually execute kernels.
+    
+    Some GPU architectures (e.g. Pascal/sm_61) are detected by the CUDA driver
+    but lack pre-compiled kernels in the installed PyTorch build. This function
+    verifies that basic CUDA computation actually works.
+    """
     try:
         import torch
 
-        return torch.cuda.is_available()
+        if not torch.cuda.is_available():
+            return False
+        # Verify kernels can actually execute (catches sm_61/Pascal issue)
+        if not _cuda_kernels_work():
+            return False
+        return True
     except Exception:
         return False
+
+
+_cuda_kernels_cache: Optional[bool] = None
+
+def _cuda_kernels_work() -> bool:
+    """Test whether PyTorch CUDA kernels can execute on the detected GPU."""
+    global _cuda_kernels_cache
+    if _cuda_kernels_cache is not None:
+        return _cuda_kernels_cache
+    try:
+        import torch
+        a = torch.randn(2, 2, device="cuda:0")
+        b = torch.randn(2, 2, device="cuda:0")
+        _ = a @ b
+        torch.cuda.synchronize()
+        _cuda_kernels_cache = True
+    except Exception:
+        _cuda_kernels_cache = False
+    return _cuda_kernels_cache
 
 
 def is_mps_available() -> bool:
@@ -242,7 +271,7 @@ class GPUConfig:
     # LM backend restriction
     # "all" = any backend, "pt_mlx_only" = only pt/mlx (no vllm), used for MPS (vllm requires CUDA)
     lm_backend_restriction: str  # "all" or "pt_mlx_only"
-    recommended_backend: str  # Recommended default backend: "vllm", "pt", or "mlx"
+    recommended_backend: str  # Recommended default backend: "vllm", "pt", "mlx", or "llamacpp"
 
     # Offload defaults
     offload_to_cpu_default: bool  # Whether offload_to_cpu should be enabled by default
@@ -270,16 +299,42 @@ class GPUConfig:
     mlx_vae_chunk_size: int = 512
 
 
+#def _apply_lm_backend_compatibility_overrides(config: GPUConfig) -> GPUConfig:
+#    """Apply runtime hardware overrides for LM backend selection."""
+#    if is_legacy_cuda_gpu():
+#        logger.info(
+#            "Legacy CUDA GPU detected (pre-Volta compute capability): "
+#            "forcing 5Hz LM backend recommendation to PyTorch."
+#        )
+#        config.lm_backend_restriction = "pt_only"
+#        config.recommended_backend = "pt"
+#    return config
+
 def _apply_lm_backend_compatibility_overrides(config: GPUConfig) -> GPUConfig:
     """Apply runtime hardware overrides for LM backend selection."""
     if is_legacy_cuda_gpu():
-        logger.info(
+        logger.warning(  # strawberry: changed from info to warning for visibility
             "Legacy CUDA GPU detected (pre-Volta compute capability): "
-            "forcing 5Hz LM backend recommendation to PyTorch."
+            "vLLM/nano-vllm may not be fully supported. Consider using llama.cpp backend (--backend llamacpp) for better compatibility."
         )
-        config.lm_backend_restriction = "pt_only"
-        config.recommended_backend = "pt"
+        config.lm_backend_restriction = "all"  # strawberry: removed pt_only restriction, set to "all" explicitly
+        # For legacy GPUs, prefer llama.cpp if available, otherwise pt
+        config.recommended_backend = "llamacpp" if _is_llamacpp_available() else "pt"
     return config
+
+
+def _is_llamacpp_available() -> bool:
+    """Check if llama.cpp Python bindings are available."""
+    try:
+        import llama_cpp
+        return True
+    except ImportError:
+        return False
+
+
+
+
+
 
 
 def resolve_lm_backend(

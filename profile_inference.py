@@ -373,7 +373,7 @@ def print_time_costs_breakdown(
             print("  Suggestions:")
             print("    1. Run with --llm-debug for token-level throughput analysis")
             print("    2. Try --no-constrained-decoding to reduce FSM overhead")
-            print("    3. Compare backends: --lm-backend vllm vs pt vs mlx")
+            print("    3. Compare backends: --lm-backend vllm vs pt vs mlx vs llamacpp")
             print(
                 "    4. Reduce lm_cfg_scale "
                 "(currently doubles forward passes if > 1.0)"
@@ -1848,7 +1848,7 @@ Examples:
         "--lm-backend",
         type=str,
         default=env_config["ACESTEP_LM_BACKEND"],
-        choices=["auto", "vllm", "pt", "mlx"],
+        choices=["auto", "vllm", "pt", "mlx", "llamacpp"],
         help=(
             f"LLM backend "
             f"(default: {env_config['ACESTEP_LM_BACKEND']})"

@@ -34,3 +34,24 @@ def get_vllm_preflight_warning(*, device: str, platform: str | None = None) -> s
         "or is incompatible. Falling back to the PyTorch backend. "
         "Use --backend pt to suppress this warning."
     )
+
+
+def get_llamacpp_preflight_warning(*, device: str, platform: str | None = None) -> str | None:
+    """Return a user-facing warning when llama.cpp should be skipped before initialization.
+
+    Args:
+        device: The resolved device string for LM initialization.
+        platform: Optional platform override for tests. Defaults to ``sys.platform``.
+
+    Returns:
+        A warning string when llama.cpp should fall back to PyTorch, otherwise ``None``.
+    """
+    try:
+        import llama_cpp
+        return None
+    except ImportError:
+        return (
+            "llama.cpp backend is not available. Please install it with: "
+            "pip install llama-cpp-python. Falling back to the PyTorch backend. "
+            "Use --backend pt to suppress this warning."
+        )

@@ -77,7 +77,7 @@ def register_sample_format_routes(
                 checkpoint_dir = os.path.join(project_root, "checkpoints")
                 lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
                 backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
-                if backend not in {"vllm", "pt", "mlx"}:
+                if backend not in {"vllm", "pt", "mlx", "llamacpp"}:
                     backend = "vllm"
 
                 lm_model_name = get_model_name(lm_model_path)
@@ -199,7 +199,7 @@ def register_sample_format_routes(
                 checkpoint_dir = os.path.join(project_root, "checkpoints")
                 lm_model_path = os.getenv("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B").strip()
                 backend = os.getenv("ACESTEP_LM_BACKEND", "vllm").strip().lower()
-                if backend not in {"vllm", "pt", "mlx"}:
+                if backend not in {"vllm", "pt", "mlx", "llamacpp"}:
                     backend = "vllm"
                 lm_device = os.getenv("ACESTEP_LM_DEVICE", os.getenv("ACESTEP_DEVICE", "auto"))
                 lm_offload = env_bool("ACESTEP_LM_OFFLOAD_TO_CPU", False)

@@ -177,6 +177,7 @@ class InitServiceLoaderMixin(InitServiceLoaderComponentsMixin):
                     trust_remote_code=True,
                     attn_implementation=candidate,
                     dtype=self.dtype,
+                    low_cpu_mem_usage=False,
                 )
                 attn_implementation = candidate
                 break

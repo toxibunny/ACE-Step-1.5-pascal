@@ -1,0 +1,48 @@
+# ACE-Step 1.5 — Pascal GPU (sm_61) compatible dependencies
+#
+# Key difference from main requirements.txt:
+#   torch 2.5.0+cu121 (NOT cu128/cu130 — those dropped sm_61 kernels)
+#   transformers 4.57.x (NOT 5.x — meta device init breaks vector_quantize_pytorch)
+#
+# Install:
+#   pip install torch==2.5.0+cu121 torchvision==0.20.0+cu121 torchaudio==2.5.0+cu121 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements-pascal.txt
+
+# --- Core (Pascal-compatible versions) ---
+transformers>=4.51.0,<4.58.0
+diffusers>=0.37.0
+accelerate>=1.12.0
+safetensors>=0.7.0
+einops>=0.8.1
+vector-quantize-pytorch>=1.27.15
+numpy>=1.24.0
+scipy>=1.10.1
+soundfile>=0.13.1
+loguru>=0.7.3
+matplotlib>=3.7.5
+
+# --- API Server ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+gradio>=4.0.0
+
+# --- Utilities ---
+toml
+numba>=0.63.1
+xxhash
+diskcache
+typer-slim>=0.21.1
+
+# --- Wavelet correction (optional but recommended) ---
+pytorch-wavelets>=1.3.0
+pywavelets>=1.9.0
+
+# --- NOT included (and why) ---
+# torch: install separately from cu121 index (see above)
+# vllm: requires compute capability 7.0+ (Volta), does NOT work on Pascal
+# flash-attn: requires compute capability 7.5+ (Ampere), does NOT work on Pascal
+# triton: requires compute capability 7.0+, does NOT work on Pascal
+# mlx: Apple Silicon only
+# nano-vllm: depends on vllm/triton, does NOT work on Pascal
+# peft/lycoris/lightning: training only, not needed for inference

@@ -25,7 +25,7 @@ from transformers.generation.logits_process import (
 from acestep.llm_backend_compat import get_vllm_preflight_warning
 from acestep.constrained_logits_processor import MetadataConstrainedLogitsProcessor
 from acestep.constants import DEFAULT_LM_INSTRUCTION, DEFAULT_LM_UNDERSTAND_INSTRUCTION, DEFAULT_LM_INSPIRED_INSTRUCTION, DEFAULT_LM_REWRITE_INSTRUCTION, DURATION_MIN, DURATION_MAX
-from acestep.gpu_config import get_lm_gpu_memory_ratio, get_gpu_memory_gb, get_lm_model_size, get_global_gpu_config
+from acestep.gpu_config import get_lm_gpu_memory_ratio, get_gpu_memory_gb, get_lm_model_size, get_global_gpu_config, _cuda_kernels_work as _cuda_compute_works
 
 # Minimum free VRAM (GB) required to attempt vLLM initialization.
 # vLLM's KV cache allocator adapts to available memory, so we only need a
@@ -43,6 +43,9 @@ def _warn_if_prerelease_python():
             RuntimeWarning,
             stacklevel=2,
         )
+
+
+
 
 
 class LLMHandler:
@@ -132,6 +135,10 @@ class LLMHandler:
                 except Exception:
                     pass
                 self._cleanup_torch_distributed_state()
+            elif self.llm_backend == "llamacpp":
+                # Clean up llama.cpp resources
+                self._llamacpp_model = None
+                self._llamacpp_tokenizer = None
             self.llm = None
             self.llm_tokenizer = None
             self.constrained_processor = None
@@ -139,6 +146,8 @@ class LLMHandler:
             self.llm_backend = None
             self._mlx_model = None
             self._mlx_model_path = None
+            self._llamacpp_model = None
+            self._llamacpp_tokenizer = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -521,13 +530,18 @@ class LLMHandler:
         """
         try:
             if device == "auto":
-                if torch.cuda.is_available():
+                if torch.cuda.is_available() and _cuda_compute_works():
                     device = "cuda"
                 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                     device = "mps"
                 elif hasattr(torch, 'xpu') and torch.xpu.is_available():
                     device = "xpu"
                 else:
+                    if torch.cuda.is_available():
+                        logger.warning(
+                            "[initialize] CUDA device detected but PyTorch kernels are incompatible "
+                            f"(e.g. Pascal/sm_61 not in build). Falling back to CPU."
+                        )
                     device = "cpu"
             elif device == "cuda" and not torch.cuda.is_available():
                 if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -539,6 +553,12 @@ class LLMHandler:
                 else:
                     logger.warning("[initialize] CUDA requested but unavailable. Falling back to CPU.")
                     device = "cpu"
+            elif device == "cuda" and torch.cuda.is_available() and not _cuda_compute_works():
+                logger.warning(
+                    "[initialize] CUDA device detected but PyTorch kernels are incompatible "
+                    "(e.g. Pascal/sm_61 not in build). Falling back to CPU."
+                )
+                device = "cpu"
             elif device == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
                 if torch.cuda.is_available():
                     logger.warning("[initialize] MPS requested but unavailable. Falling back to CUDA.")
@@ -702,6 +722,23 @@ class LLMHandler:
                     status_msg = f"✅ 5Hz LM initialized (PyTorch fallback, MLX not available)\nModel: {full_lm_model_path}\nBackend: PyTorch"
                     return status_msg, True
 
+            # Handle llama.cpp backend - ideal for legacy CUDA GPUs (Pascal, etc.)
+            if backend == "llamacpp":
+                if not self._is_llamacpp_available():
+                    logger.warning("llama.cpp Python bindings not available. Falling back to PyTorch.")
+                    backend = "pt"
+                else:
+                    # Check if we're on a legacy CUDA GPU - llama.cpp works well here
+                    from acestep.gpu_config import is_legacy_cuda_gpu
+                    if is_legacy_cuda_gpu():
+                        logger.info("Legacy CUDA GPU detected - llama.cpp is a good choice for compatibility")
+                    status_msg = self._initialize_5hz_lm_llamacpp(full_lm_model_path)
+                    if status_msg.startswith("✅"):
+                        return status_msg, True
+                    else:
+                        logger.warning(f"llama.cpp initialization failed: {status_msg}")
+                        backend = "pt"
+
             if backend == "vllm" and device != "cuda":
                 logger.info(
                     f"[initialize] vllm backend requires CUDA, using PyTorch backend for device={device}."
@@ -757,6 +794,14 @@ class LLMHandler:
                                 if mlx_success:
                                     return mlx_status, True
                                 logger.warning(f"MLX also failed: {mlx_status}, falling back to PyTorch")
+                            # Try llama.cpp as fallback for legacy CUDA GPUs
+                            from acestep.gpu_config import is_legacy_cuda_gpu
+                            if device == "cuda" and is_legacy_cuda_gpu() and self._is_llamacpp_available():
+                                logger.warning("vllm failed on legacy CUDA GPU, trying llama.cpp backend...")
+                                llamacpp_success, llamacpp_status = self._load_llamacpp_model(full_lm_model_path)
+                                if llamacpp_success:
+                                    return llamacpp_status, True
+                                logger.warning(f"llama.cpp also failed: {llamacpp_status}, falling back to PyTorch")
                             logger.warning("Falling back to PyTorch backend")
                             success, status_msg = self._load_pytorch_model(full_lm_model_path, device)
                             if not success:
@@ -2396,6 +2441,9 @@ class LLMHandler:
         if self.llm_backend == "mlx":
             if self._mlx_model is None or self.llm_tokenizer is None:
                 return "", "❌ 5Hz LM is missing MLX model or tokenizer."
+        elif self.llm_backend == "llamacpp":
+            if self._llamacpp_model is None or self._llamacpp_tokenizer is None:
+                return "", "❌ 5Hz LM is missing llama.cpp model or tokenizer."
         elif self.llm is None or self.llm_tokenizer is None:
             return "", "❌ 5Hz LM is missing model or tokenizer."
 
@@ -2442,6 +2490,32 @@ class LLMHandler:
                 )
                 self._clear_accelerator_cache()
                 return output_text, f"✅ Generated successfully (vllm) | length={len(output_text)}"
+
+            elif self.llm_backend == "llamacpp":
+                # llama.cpp backend
+                output_text = self._run_llamacpp(
+                    formatted_prompts=formatted_prompt,
+                    temperature=temperature,
+                    cfg_scale=cfg_scale,
+                    negative_prompt=negative_prompt,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    use_constrained_decoding=use_constrained_decoding,
+                    constrained_decoding_debug=constrained_decoding_debug,
+                    target_duration=target_duration,
+                    user_metadata=user_metadata,
+                    stop_at_reasoning=stop_at_reasoning,
+                    skip_genres=skip_genres,
+                    skip_caption=skip_caption,
+                    skip_language=skip_language,
+                    generation_phase=generation_phase,
+                    caption=caption,
+                    lyrics=lyrics,
+                    cot_text=cot_text,
+                )
+                self._clear_accelerator_cache()
+                return output_text, f"✅ Generated successfully (llamacpp) | length={len(output_text)}"
 
             elif self.llm_backend == "mlx":
                 # MLX backend (Apple Silicon native)
@@ -4153,6 +4227,448 @@ class LLMHandler:
                 torch.mps.empty_cache()
             offload_time = time.time() - start_time
             logger.info(f"Offloaded LLM to CPU in {offload_time:.4f}s")
+
+    # =========================================================================
+    # Llama.cpp Backend Support
+    # =========================================================================
+
+    @staticmethod
+    def _is_llamacpp_available() -> bool:
+        """Check if llama.cpp Python bindings are available."""
+        try:
+            import llama_cpp
+            return True
+        except ImportError:
+            return False
+
+    def _load_llamacpp_model(self, model_path: str) -> Tuple[bool, str]:
+        """
+        Load the 5Hz LM model using llama.cpp backend.
+        
+        This is ideal for legacy CUDA GPUs (Pascal, pre-Volta) where vLLM/nano-vllm
+        may not work well due to compute capability limitations.
+
+        Args:
+            model_path: Path to the HuggingFace model directory
+
+        Returns:
+            Tuple of (success, status_message)
+        """
+        try:
+            import llama_cpp
+            from transformers import AutoTokenizer
+            import time
+
+            logger.info(f"Loading llama.cpp model from {model_path}")
+            start_time = time.time()
+
+            # Convert HuggingFace model to llama.cpp format if needed
+            # First, check if there's already a gguf file
+            gguf_path = None
+            model_dir = model_path
+            
+            # Look for gguf files in the model directory
+            import os
+            for file in os.listdir(model_dir):
+                if file.endswith('.gguf'):
+                    gguf_path = os.path.join(model_dir, file)
+                    break
+            
+            if gguf_path is None:
+                # Need to convert from HuggingFace to gguf
+                logger.info("No gguf file found, converting from HuggingFace format...")
+                try:
+                    from huggingface_hub import snapshot_download
+                    from llama_cpp import convert_hf_to_gguf
+                    
+                    # For now, we'll try to use the model directly
+                    # In production, users should pre-convert their models
+                    logger.warning(
+                        "llama.cpp requires GGUF format. Please convert your model first. "
+                        "You can use: python -m llama_cpp.convert --model <model_path> --outfile <output.gguf>"
+                    )
+                    return False, "❌ Model needs to be in GGUF format for llama.cpp backend"
+                except Exception as e:
+                    logger.error(f"Failed to convert model: {e}")
+                    return False, f"❌ Conversion failed: {str(e)}"
+            
+            # Load the model with llama.cpp
+            # Use GPU if available, otherwise CPU
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            # Determine n_gpu_layers based on available VRAM
+            n_gpu_layers = 0
+            if device == "cuda":
+                try:
+                    total_vram_gb = get_gpu_memory_gb()
+                    # For Pascal GPUs with 24GB, we can offload most layers to GPU
+                    if total_vram_gb >= 24:
+                        n_gpu_layers = 100  # Offload all layers
+                    elif total_vram_gb >= 16:
+                        n_gpu_layers = 50
+                    elif total_vram_gb >= 8:
+                        n_gpu_layers = 20
+                    else:
+                        n_gpu_layers = 0  # Use CPU only
+                    logger.info(f"Using n_gpu_layers={n_gpu_layers} for {total_vram_gb}GB VRAM")
+                except Exception:
+                    n_gpu_layers = 0
+            
+            # Load tokenizer
+            try:
+                self._llamacpp_tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+            except Exception as e:
+                logger.warning(f"Failed to load tokenizer from {model_path}: {e}")
+                # Try to find tokenizer files in the model directory
+                tokenizer_files = [f for f in os.listdir(model_dir) if 'tokenizer' in f.lower()]
+                if tokenizer_files:
+                    tokenizer_path = os.path.join(model_dir, tokenizer_files[0])
+                    try:
+                        self._llamacpp_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+                    except Exception as e2:
+                        logger.error(f"Failed to load tokenizer from {tokenizer_path}: {e2}")
+                        return False, f"❌ Failed to load tokenizer: {str(e2)}"
+                else:
+                    return False, f"❌ No tokenizer found in {model_path}"
+            
+            # Load model
+            try:
+                self._llamacpp_model = llama_cpp.Llama(
+                    model_path=gguf_path,
+                    n_gpu_layers=n_gpu_layers,
+                    n_ctx=self.max_model_len,
+                    verbose=False,
+                )
+                logger.info(f"llama.cpp model loaded successfully in {time.time() - start_time:.2f}s")
+                
+                self.llm_backend = "llamacpp"
+                self.llm_initialized = True
+                self.llm_tokenizer = self._llamacpp_tokenizer
+                
+                device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+                status_msg = (
+                    f"✅ 5Hz LM initialized successfully\n"
+                    f"Model: {model_path}\n"
+                    f"Backend: llama.cpp\n"
+                    f"Device: {device_name}\n"
+                    f"GPU Layers: {n_gpu_layers}"
+                )
+                return True, status_msg
+                
+            except Exception as e:
+                logger.error(f"Failed to load llama.cpp model: {e}")
+                return False, f"❌ Error loading llama.cpp model: {str(e)}"
+                
+        except Exception as e:
+            logger.error(f"llama.cpp backend error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False, f"❌ llama.cpp backend error: {str(e)}"
+
+    def _initialize_5hz_lm_llamacpp(self, model_path: str) -> str:
+        """Initialize 5Hz LM model using llama.cpp backend."""
+        # llama.cpp can work on both GPU and CPU
+        try:
+            success, status_msg = self._load_llamacpp_model(model_path)
+            if success:
+                return status_msg
+            else:
+                return status_msg
+        except Exception as e:
+            return f"❌ Error initializing 5Hz LM with llama.cpp: {str(e)}"
+
+    def _get_llamacpp_audio_code_mask(self) -> 'tuple':
+        """
+        Precompute the audio code token mask for constrained codes generation.
+        
+        Returns:
+            Tuple of (mask_array, eos_token_id, num_audio_codes) where mask_array
+            is a numpy float32 array of shape [vocab_size] with 0.0 at valid audio
+            code token positions and -inf elsewhere.
+        """
+        import numpy as np
+        
+        if hasattr(self, '_llamacpp_code_mask') and self._llamacpp_code_mask is not None:
+            return self._llamacpp_code_mask
+        
+        vocab_size = self._llamacpp_model.n_vocab
+        eos_token_id = self._llamacpp_model.token_eos
+        
+        # Build mask: -inf everywhere, 0 at audio code positions
+        mask = np.full(vocab_size, -np.inf, dtype=np.float32)
+        
+        # Find audio code tokens by scanning the tokenizer vocab
+        # Audio code tokens have the form: <|audio_code_NNNNN|>
+        import re as _re
+        audio_code_pattern = _re.compile(r'^<\|audio_code_(\d+)\|>$')
+        max_audio_code = 63999  # codebook size = 64000
+        
+        audio_code_count = 0
+        # Use the tokenizer's vocab to find audio code tokens efficiently
+        try:
+            vocab = self._llamacpp_tokenizer.get_vocab()
+            for token_text, token_id in vocab.items():
+                match = audio_code_pattern.match(token_text)
+                if match:
+                    code_val = int(match.group(1))
+                    if 0 <= code_val <= max_audio_code:
+                        mask[token_id] = 0.0
+                        audio_code_count += 1
+        except Exception:
+            # Fallback: scan token IDs sequentially
+            for token_id in range(vocab_size):
+                try:
+                    token_text = self._llamacpp_tokenizer.decode([token_id])
+                    m = audio_code_pattern.match(token_text)
+                    if m:
+                        code_val = int(m.group(1))
+                        if 0 <= code_val <= max_audio_code:
+                            mask[token_id] = 0.0
+                            audio_code_count += 1
+                except Exception:
+                    continue
+        
+        if audio_code_count == 0:
+            logger.warning("No audio code tokens found in vocabulary! Codes generation will fail.")
+        else:
+            logger.info(f"Precomputed audio code mask: {audio_code_count} valid code tokens out of {vocab_size} vocab")
+        
+        self._llamacpp_code_mask = (mask, eos_token_id, audio_code_count)
+        return self._llamacpp_code_mask
+
+    def _llamacpp_generate_codes(
+        self,
+        prompt: str,
+        target_codes: int,
+        temperature: float,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+    ) -> str:
+        """
+        Generate audio codes using llama.cpp with constrained decoding.
+        
+        Uses the low-level generate() API with a custom logits processor
+        that only allows audio code tokens and forces EOS at target count.
+        """
+        import numpy as np
+        from llama_cpp import LogitsProcessorList
+        
+        # Get precomputed mask
+        code_mask, eos_token_id, num_codes_available = self._get_llamacpp_audio_code_mask()
+        
+        if num_codes_available == 0:
+            raise RuntimeError("No audio code tokens available in model vocabulary")
+        
+        # Create logits processor for codes phase
+        class _CodesPhaseProcessor:
+            """Logits processor that only allows audio code tokens."""
+            def __init__(self, mask, eos_id, target):
+                self.mask = mask
+                self.eos_id = eos_id
+                self.target = target
+                self.prompt_len = None
+                
+            def __call__(self, input_ids, scores):
+                if self.prompt_len is None:
+                    self.prompt_len = len(input_ids)
+                
+                generated = len(input_ids) - self.prompt_len
+                
+                if generated >= self.target:
+                    # Force EOS when target reached
+                    scores.fill(-np.inf)
+                    scores[self.eos_id] = 0.0
+                    return scores
+                
+                # Only allow audio code tokens
+                scores += self.mask
+                # Block EOS until target reached
+                scores[self.eos_id] = -np.inf
+                return scores
+        
+        processor = _CodesPhaseProcessor(code_mask, eos_token_id, target_codes)
+        processor_list = LogitsProcessorList([processor])
+        
+        # Tokenize prompt
+        prompt_tokens = self._llamacpp_model.tokenize(prompt.encode('utf-8'), add_bos=True)
+        
+        # Generate codes using low-level API with constrained sampling
+        generated_tokens = []
+        for token in self._llamacpp_model.generate(
+            prompt_tokens,
+            top_k=top_k if top_k and top_k > 0 else 40,
+            top_p=top_p if top_p and 0.0 < top_p < 1.0 else 0.95,
+            temp=max(temperature, 0.01),
+            repeat_penalty=repetition_penalty,
+            reset=True,
+            logits_processor=processor_list,
+        ):
+            if token == eos_token_id:
+                break
+            generated_tokens.append(token)
+            if len(generated_tokens) >= target_codes:
+                break
+        
+        logger.info(f"llama.cpp codes generation: produced {len(generated_tokens)}/{target_codes} tokens")
+        
+        # Detokenize
+        if generated_tokens:
+            return self._llamacpp_model.detokenize(generated_tokens, special=True).decode('utf-8', errors='replace')
+        return ""
+
+    def _llamacpp_generate_metadata(
+        self,
+        prompt: str,
+        temperature: float,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+        max_tokens: int = 512,
+    ) -> str:
+        """
+        Generate metadata (think block) using llama.cpp.
+        
+        The metadata is short (~20-50 tokens) so we generate freely with a
+        reasonable max_tokens. The model is trained to produce the think block
+        format and will naturally transition to codes after closing the tag.
+        We truncate at the closing tag if present.
+        """
+        output = self._llamacpp_model.create_completion(
+            prompt=prompt,
+            max_tokens=min(max_tokens, 200),  # Metadata is short, cap at 200
+            temperature=max(temperature, 0.01),
+            top_k=top_k if top_k and top_k > 0 else 40,
+            top_p=top_p if top_p and 0.0 < top_p < 1.0 else 0.95,
+            repeat_penalty=repetition_penalty,
+        )
+        
+        if "choices" in output and len(output["choices"]) > 0:
+            text = output["choices"][0].get("text", "")
+        else:
+            text = str(output)
+        
+        # Truncate at the closing think tag if present (model may have started
+        # generating codes after the tag)
+        # The closing tag is a special token - find it by looking for the
+        # pattern where metadata ends and codes begin
+        # Audio code tokens start with a distinctive pattern
+        import re as _re
+        code_match = _re.search(r'<\|audio_code_\d+\|>', text)
+        if code_match:
+            # Truncate right before the first audio code token
+            text = text[:code_match.start()]
+        
+        return text
+
+    def _run_llamacpp(
+        self,
+        formatted_prompts: Union[str, List[str]],
+        temperature: float,
+        cfg_scale: float,
+        negative_prompt: str,
+        top_k: Optional[int],
+        top_p: Optional[float],
+        repetition_penalty: float,
+        use_constrained_decoding: bool = True,
+        constrained_decoding_debug: bool = False,
+        metadata_temperature: Optional[float] = None,
+        codes_temperature: Optional[float] = None,
+        target_duration: Optional[float] = None,
+        user_metadata: Optional[Dict[str, Optional[str]]] = None,
+        stop_at_reasoning: bool = False,
+        skip_genres: bool = True,
+        skip_caption: bool = False,
+        skip_language: bool = False,
+        generation_phase: str = "cot",
+        caption: str = "",
+        lyrics: str = "",
+        cot_text: str = "",
+        seeds: Optional[List[int]] = None,
+    ) -> Union[str, List[str]]:
+        """
+        Generate text using llama.cpp backend with proper constrained decoding.
+        
+        Two-phase approach:
+        1. Metadata phase: Generate think block (bpm, caption, duration, etc.)
+        2. Codes phase: Generate exact number of audio code tokens with
+           logits masking to only allow valid code tokens.
+        
+        Supports both single and batch modes.
+        """
+        # Normalize input
+        formatted_prompt_list, is_batch = self._normalize_batch_input(formatted_prompts)
+        
+        # Determine effective temperatures per phase
+        meta_temp = metadata_temperature if metadata_temperature is not None else temperature
+        codes_temp = codes_temperature if codes_temperature is not None else temperature
+        
+        # Calculate target codes count
+        if target_duration is not None and target_duration > 0:
+            target_codes = int(target_duration * 5)  # 5 codes per second
+        else:
+            # Fallback: use a reasonable default
+            target_codes = min(self.max_model_len - 64, 1500)  # ~5 min max
+            logger.warning(f"llama.cpp: no target_duration set, using fallback target_codes={target_codes}")
+        
+        output_texts = []
+        
+        for prompt in formatted_prompt_list:
+            try:
+                full_output = ""
+                
+                if generation_phase == "cot":
+                    # Phase 1: Generate metadata (think block)
+                    logger.info("llama.cpp: Phase 1 - generating metadata...")
+                    metadata_text = self._llamacpp_generate_metadata(
+                        prompt=prompt,
+                        temperature=meta_temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                    )
+                    logger.info(f"llama.cpp: metadata generated ({len(metadata_text)} chars)")
+                    full_output += metadata_text
+                    
+                    # Phase 2: Generate codes with the metadata in context
+                    logger.info(f"llama.cpp: Phase 2 - generating {target_codes} codes...")
+                    codes_prompt = prompt + metadata_text
+                    codes_text = self._llamacpp_generate_codes(
+                        prompt=codes_prompt,
+                        target_codes=target_codes,
+                        temperature=codes_temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                    )
+                    full_output += codes_text
+                    
+                elif generation_phase == "codes":
+                    # Codes phase only (metadata already in prompt)
+                    logger.info(f"llama.cpp: Generating {target_codes} codes (codes phase)...")
+                    codes_text = self._llamacpp_generate_codes(
+                        prompt=prompt,
+                        target_codes=target_codes,
+                        temperature=codes_temp,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                    )
+                    full_output = codes_text
+                
+                else:
+                    raise ValueError(f"Unknown generation_phase: {generation_phase!r}")
+                
+                output_texts.append(full_output)
+                
+            except Exception as e:
+                logger.error(f"Error generating with llama.cpp: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                output_texts.append(f"[ERROR: {str(e)}]")
+        
+        # Return single string for single mode, list for batch mode
+        return output_texts[0] if not is_batch else output_texts
 
     def get_hf_model_for_scoring(self):
         """

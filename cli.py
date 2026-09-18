@@ -1042,8 +1042,8 @@ def main():
         "--backend",
         type=str,
         default=None,
-        choices=["vllm", "pt", "mlx"],
-        help="5Hz LM backend. Auto-detected if not specified: 'mlx' on Apple Silicon, 'vllm' on CUDA, 'pt' otherwise.",
+        choices=["vllm", "pt", "mlx", "llamacpp"],
+        help="5Hz LM backend. Auto-detected if not specified: 'mlx' on Apple Silicon, 'vllm' on CUDA, 'pt' otherwise. Use 'llamacpp' for legacy CUDA GPUs (Pascal, etc.).",
     )
     parser.add_argument(
         "--log-level",
@@ -1311,7 +1311,7 @@ def main():
     # --- Handler Initialization ---
     if args.backend == "pyTorch":
         args.backend = "pt"
-    if args.backend not in {"vllm", "pt", "mlx"}:
+    if args.backend not in {"vllm", "pt", "mlx", "llamacpp"}:
         args.backend = "vllm"
 
     print("Initializing ACE-Step handlers...")
