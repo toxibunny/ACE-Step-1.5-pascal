@@ -99,10 +99,11 @@ class InitServiceOrchestratorMixin:
                 elif gpu_config.cuda_supports_bfloat16():
                     self.dtype = torch.bfloat16
                 else:
-                    self.dtype = torch.float16
+                    # Pascal (sm_61): use float32 to avoid fp16 overflow in DiT
+                    self.dtype = torch.float32
                     logger.info(
-                        "[initialize_service] Pre-Ampere CUDA detected: "
-                        "using float16 instead of bfloat16."
+                        "[initialize_service] Pascal GPU detected (pre-Ampere): "
+                        "using float32 to avoid fp16 overflow."
                     )
             else:
                 self.dtype = torch.bfloat16 if resolved_device == "xpu" else torch.float32
