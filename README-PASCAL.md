@@ -258,6 +258,17 @@ nvidia-smi
 python cli.py generate --device cuda:0 --lm-device cuda:1
 ```
 
+### `NaN or Inf latents` (fp16 overflow)
+Pascal GPUs overflow in fp16 during DiT diffusion. Set float32:
+```bash
+export ACESTEP_DTYPE=float32
+```
+This is **required** for Pascal. Add it to your `.bashrc` or the launch script.
+
+### `Expected all tensors to be on the same device`
+Multi-GPU setup issue — make sure you're using the patched version which
+auto-splits DiT→cuda:0, LM→cuda:1 and verifies all weights are on-device.
+
 ### `libcudart.so.12 not found`
 Install CUDA 12 runtime:
 ```bash

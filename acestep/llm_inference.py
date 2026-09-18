@@ -413,6 +413,14 @@ class LLMHandler:
             self.llm = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
             if not self.offload_to_cpu:
                 self.llm = self.llm.to(device).to(self.dtype)
+                # Ensure ALL params/buffers are on target device (catch stragglers)
+                target_dev = torch.device(device)
+                for name, param in self.llm.named_parameters():
+                    if param.device != target_dev:
+                        param.data = param.data.to(target_dev)
+                for name, buf in self.llm.named_buffers():
+                    if buf is not None and buf.device != target_dev:
+                        buf.data = buf.data.to(target_dev)
             else:
                 self.llm = self.llm.to("cpu").to(self.dtype)
             self.llm.eval()

@@ -98,6 +98,19 @@ def init_service_wrapper(
             lm_device = "cpu"
         else:
             lm_device = device
+            # Multi-GPU: split DiT and LM across different GPUs to avoid OOM
+            if device in ("auto", "cuda"):
+                try:
+                    import torch
+                    if torch.cuda.device_count() > 1:
+                        # DiT goes on cuda:0, LM goes on cuda:1
+                        lm_device = "cuda:1"
+                        logger.info(
+                            f"Multi-GPU detected ({torch.cuda.device_count()} GPUs): "
+                            f"DiT → cuda:0, LM → cuda:1"
+                        )
+                except Exception:
+                    pass  # fall through to single-GPU behavior
 
     if init_llm and lm_model_path and gpu_config.available_lm_models:
         if not is_lm_model_size_allowed(lm_model_path, gpu_config.available_lm_models):
