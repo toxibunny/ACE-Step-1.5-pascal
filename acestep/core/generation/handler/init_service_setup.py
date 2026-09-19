@@ -103,6 +103,9 @@ class InitServiceSetupMixin:
         """Validate quantization prerequisites before model loading."""
         if quantization is None:
             return
+        # int8_weight_only uses our manual quantizer (no torchao needed)
+        if quantization == "int8_weight_only":
+            return
         try:
             import torchao  # noqa: F401
         except Exception as exc:

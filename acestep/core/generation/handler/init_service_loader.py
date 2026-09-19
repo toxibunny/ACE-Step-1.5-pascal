@@ -90,27 +90,32 @@ class InitServiceLoaderMixin(InitServiceLoaderComponentsMixin):
         raise ValueError(f"Unsupported quantization type: {quantization}")
 
     def _apply_dit_quantization(self, quantization: Optional[str]) -> None:
-        """Apply torchao quantization to DiT linear layers when requested."""
+        """Apply int8 weight-only quantization to DiT linear layers."""
         if quantization is None:
             return
-        from torchao.quantization import quantize_
-        from torchao.quantization.quant_api import _is_linear
+        if quantization == "int8_weight_only":
+            from acestep.int8_quantize import quantize_dit_int8
+            count = quantize_dit_int8(self.model)
+            logger.info(f"[initialize_service] DiT int8 quantized: {count} linear layers")
+        else:
+            # Fallback to torchao for other quantization types
+            from torchao.quantization import quantize_
+            from torchao.quantization.quant_api import _is_linear
 
-        quant_config = self._build_quantization_config(quantization)
-        def _dit_filter_fn(module, fqn):
-            """Keep only decoder-side DiT linear layers and exclude tokenizers."""
-            if not _is_linear(module, fqn):
-                return False
-            parts = fqn.split(".")
-            if not parts or parts[0] != "decoder":
-                return False
-            for part in parts:
-                if part in ("tokenizer", "detokenizer"):
+            quant_config = self._build_quantization_config(quantization)
+            def _dit_filter_fn(module, fqn):
+                if not _is_linear(module, fqn):
                     return False
-            return True
+                parts = fqn.split(".")
+                if not parts or parts[0] != "decoder":
+                    return False
+                for part in parts:
+                    if part in ("tokenizer", "detokenizer"):
+                        return False
+                return True
 
-        quantize_(self.model, quant_config, filter_fn=_dit_filter_fn)
-        logger.info(f"[initialize_service] DiT quantized with: {quantization}")
+            quantize_(self.model, quant_config, filter_fn=_dit_filter_fn)
+            logger.info(f"[initialize_service] DiT quantized with: {quantization}")
 
     def _load_main_model_from_checkpoint(
         self,

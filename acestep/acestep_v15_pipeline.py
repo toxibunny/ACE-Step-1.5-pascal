@@ -566,14 +566,21 @@ def main():
                             file=sys.stderr,
                         )
 
+                    # Multi-GPU split: put LM on cuda:1 if available
+                    import torch as _torch
+                    _lm_device = args.device
+                    if _lm_device in ("auto", "cuda") and _torch.cuda.device_count() > 1:
+                        _lm_device = "cuda:1"
+                        print(f"Multi-GPU detected: splitting LM to {_lm_device}")
+
                     print(
-                        f"Initializing 5Hz LM: {args.lm_model_path} on {args.device}..."
+                        f"Initializing 5Hz LM: {args.lm_model_path} on {_lm_device}..."
                     )
                     lm_status, lm_success = llm_handler.initialize(
                         checkpoint_dir=checkpoint_dir,
                         lm_model_path=args.lm_model_path,
                         backend=args.backend,
-                        device=args.device,
+                        device=_lm_device,
                         offload_to_cpu=args.offload_to_cpu,
                         dtype=None,
                     )

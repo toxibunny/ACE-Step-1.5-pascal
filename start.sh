@@ -27,6 +27,7 @@ nohup "$PYTHON" -m acestep.acestep_v15_pipeline \
     --lm_model_path acestep-5Hz-lm-1.7B \
     --init_llm true \
     --enable-api \
+    --quantization int8_weight_only \
     > "$LOG_FILE" 2>&1 &
 
 echo $! > "$PID_FILE"
